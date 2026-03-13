@@ -6,7 +6,7 @@ on:
       issue_number:
         description: 'GitHub issue number to work on'
         required: true
-        type: string
+        type: number
       additional_instructions:
         description: 'Extra instructions beyond the issue body'
         required: false
