@@ -103,8 +103,14 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Set up PIA integration
-        if: ${{ secrets.PIA_MCP_CLIENT_KEY != '' }}
+        env:
+          PIA_MCP_KEY: ${{ secrets.PIA_MCP_CLIENT_KEY }}
         run: |
+          if [ -z "$PIA_MCP_KEY" ]; then
+            echo "No PIA_MCP_CLIENT_KEY secret — skipping PIA integration."
+            exit 0
+          fi
+
           # Fetch hooks from the cloud-claude repo
           HOOKS_BASE="https://raw.githubusercontent.com/GoblinCola/cloud-claude/main/hooks"
           mkdir -p ~/.claude/hooks/lib
@@ -115,7 +121,7 @@ jobs:
           curl -sL "$HOOKS_BASE/lib/mcp-client.js" -o ~/.claude/hooks/lib/mcp-client.js
           curl -sL "$HOOKS_BASE/package.json" -o ~/.claude/hooks/package.json
 
-          echo "${{ secrets.PIA_MCP_CLIENT_KEY }}" > ~/.claude/pia-mcp-key
+          echo "$PIA_MCP_KEY" > ~/.claude/pia-mcp-key
 
           cat > ~/.claude/settings.json << 'EOF'
           {
@@ -140,7 +146,7 @@ jobs:
                 "type": "http",
                 "url": "https://pia.goblincola.com/mcp",
                 "headers": {
-                  "Authorization": "Bearer ${{ secrets.PIA_MCP_CLIENT_KEY }}"
+                  "Authorization": "Bearer $PIA_MCP_KEY"
                 }
               }
             }
