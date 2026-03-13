@@ -1,0 +1,51 @@
+# Copy this file to .github/workflows/claude.yml in your repo.
+# Then add these secrets to your repo (or org): ANTHROPIC_API_KEY, PIA_MCP_CLIENT_KEY
+#
+# Usage:
+#   - Comment "@claude" on any assigned issue
+#   - Or trigger manually: gh workflow run claude.yml -f issue_number=42
+
+name: Claude Cloud Session
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'GitHub issue number to work on'
+        required: true
+        type: number
+      additional_instructions:
+        description: 'Extra instructions beyond the issue body'
+        required: false
+        type: string
+
+concurrency:
+  group: claude-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  # @claude comment trigger
+  comment-trigger:
+    if: >
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@claude') &&
+      !github.event.issue.pull_request
+    uses: GoblinCola/cloud-claude/.github/workflows/claude-session.yml@main
+    with:
+      issue_number: ${{ github.event.issue.number }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      PIA_MCP_CLIENT_KEY: ${{ secrets.PIA_MCP_CLIENT_KEY }}
+
+  # Manual / programmatic trigger
+  dispatch-trigger:
+    if: github.event_name == 'workflow_dispatch'
+    uses: GoblinCola/cloud-claude/.github/workflows/claude-session.yml@main
+    with:
+      issue_number: ${{ inputs.issue_number }}
+      additional_instructions: ${{ inputs.additional_instructions || '' }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      PIA_MCP_CLIENT_KEY: ${{ secrets.PIA_MCP_CLIENT_KEY }}

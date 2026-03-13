@@ -1,0 +1,337 @@
+name: Claude Cloud Session (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'GitHub issue number to work on'
+        required: true
+        type: number
+      additional_instructions:
+        description: 'Extra instructions beyond the issue body'
+        required: false
+        type: string
+        default: ''
+      model:
+        description: 'Claude model to use'
+        required: false
+        type: string
+        default: 'claude-opus-4-6'
+      max_turns:
+        description: 'Maximum conversation turns'
+        required: false
+        type: number
+        default: 50
+      timeout_minutes:
+        description: 'Job timeout in minutes'
+        required: false
+        type: number
+        default: 30
+      extra_allowed_tools:
+        description: 'Additional allowedTools (comma-separated, appended to defaults)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      PIA_MCP_CLIENT_KEY:
+        required: false
+
+jobs:
+  run-claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    outputs:
+      pr_url: ${{ steps.pr.outputs.url }}
+      pr_created: ${{ steps.pr.outputs.created }}
+      asked_questions: ${{ steps.detect.outputs.asked_questions }}
+
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+
+      - name: Validate assignee
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUM="${{ inputs.issue_number }}"
+          ASSIGNEE=$(gh issue view "$ISSUE_NUM" --json assignees -q '.assignees[0].login // empty')
+
+          if [ -z "$ASSIGNEE" ]; then
+            echo "::error::Issue #${ISSUE_NUM} has no assignee. Assign someone before triggering Claude."
+            gh issue comment "$ISSUE_NUM" --body "Cloud Claude session aborted: this issue has no assignee. Please assign someone and try again."
+            exit 1
+          fi
+
+          # Identity mapping — add new team members here
+          case "$ASSIGNEE" in
+            goblin-cola)
+              echo "git_name=Claude-lina.zhukov" >> "$GITHUB_OUTPUT"
+              echo "git_email=lina.zhukov@goblin-cola.com" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::No identity mapping for GitHub user '${ASSIGNEE}'. Add mapping to the reusable workflow."
+              exit 1
+              ;;
+          esac
+
+      - name: Configure git identity
+        run: |
+          git config user.name "${{ steps.identity.outputs.git_name }}"
+          git config user.email "${{ steps.identity.outputs.git_email }}"
+
+      - name: Create feature branch
+        id: branch
+        run: |
+          BRANCH="claude/issue-${{ inputs.issue_number }}"
+          git checkout -b "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Set up PIA integration
+        if: ${{ secrets.PIA_MCP_CLIENT_KEY != '' }}
+        run: |
+          # Fetch hooks from the cloud-claude repo
+          HOOKS_BASE="https://raw.githubusercontent.com/GoblinCola/cloud-claude/main/hooks"
+          mkdir -p ~/.claude/hooks/lib
+
+          curl -sL "$HOOKS_BASE/session-start.js" -o ~/.claude/hooks/session-start.js
+          curl -sL "$HOOKS_BASE/prompt-submit.js" -o ~/.claude/hooks/prompt-submit.js
+          curl -sL "$HOOKS_BASE/pre-compact.js" -o ~/.claude/hooks/pre-compact.js
+          curl -sL "$HOOKS_BASE/lib/mcp-client.js" -o ~/.claude/hooks/lib/mcp-client.js
+          curl -sL "$HOOKS_BASE/package.json" -o ~/.claude/hooks/package.json
+
+          echo "${{ secrets.PIA_MCP_CLIENT_KEY }}" > ~/.claude/pia-mcp-key
+
+          cat > ~/.claude/settings.json << 'EOF'
+          {
+            "hooks": {
+              "SessionStart": [
+                { "matcher": "", "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/session-start.js" }] }
+              ],
+              "UserPromptSubmit": [
+                { "matcher": "", "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/prompt-submit.js" }] }
+              ],
+              "PreCompact": [
+                { "matcher": "", "hooks": [{ "type": "command", "command": "node ~/.claude/hooks/pre-compact.js" }] }
+              ]
+            }
+          }
+          EOF
+
+          cat > /tmp/mcp-config.json << MCPEOF
+          {
+            "mcpServers": {
+              "pia": {
+                "type": "http",
+                "url": "https://pia.goblincola.com/mcp",
+                "headers": {
+                  "Authorization": "Bearer ${{ secrets.PIA_MCP_CLIENT_KEY }}"
+                }
+              }
+            }
+          }
+          MCPEOF
+
+      - name: Build prompt from issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUM="${{ inputs.issue_number }}"
+
+          ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json title,body,labels,comments)
+          ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+          ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body')
+          ISSUE_LABELS=$(echo "$ISSUE_JSON" | jq -r '[.labels[].name] | join(", ")')
+
+          COMMENTS=$(echo "$ISSUE_JSON" | jq -r '
+            .comments[] |
+            "**\(.author.login)** (\(.createdAt)):\n\(.body)\n"
+          ')
+
+          FINAL_SPEC=$(echo "$ISSUE_JSON" | jq -r '
+            [.comments[] | select(.body | test("FINAL SPEC"; "i"))] | last | .body // empty
+          ')
+
+          {
+            echo "# Task: ${ISSUE_TITLE}"
+            echo ""
+            echo "You are working on GitHub issue #${ISSUE_NUM}."
+            echo "Branch: ${{ steps.branch.outputs.name }}"
+            if [ -n "$ISSUE_LABELS" ]; then
+              echo "Labels: ${ISSUE_LABELS}"
+            fi
+            echo ""
+
+            echo "## Issue Description"
+            echo "$ISSUE_BODY"
+            echo ""
+
+            if [ -n "$COMMENTS" ]; then
+              echo "## Discussion Thread"
+              echo "$COMMENTS"
+              echo ""
+            fi
+
+            if [ -n "$FINAL_SPEC" ]; then
+              echo "## Final Specification"
+              echo "The following FINAL SPEC comment is the **primary instruction** to follow:"
+              echo ""
+              echo "$FINAL_SPEC"
+              echo ""
+            fi
+
+            echo "## Instructions"
+            echo "1. Implement the changes described in the specification (or issue body if no spec)."
+            echo "2. Follow existing code patterns and conventions in this repository."
+            echo "3. Write tests if the codebase has test infrastructure."
+            echo "4. Create atomic, well-described commits."
+            echo "5. Do NOT push to main. Work only on branch: ${{ steps.branch.outputs.name }}"
+            echo "6. Use sendAgentMessage to notify PIA when you start and finish work."
+            echo "7. IMPORTANT — Before writing ANY code, check that the issue has a clear definition of done."
+            echo "   You need to be able to answer: what is the scope of the change, what files or components"
+            echo "   are affected, and how will we know it works? If the issue is missing scope, success criteria,"
+            echo "   or specific requirements, you MUST stop and ask clarifying questions by running:"
+            echo "   gh issue comment $ISSUE_NUM --body '<your questions>'"
+            echo "   Then exit without making code changes. Do NOT fill in the blanks yourself — the team wants"
+            echo "   to make those decisions. Only proceed if the issue (or FINAL SPEC) gives you enough detail"
+            echo "   to implement confidently without making judgment calls about scope or behavior."
+
+            if [ -n "${{ inputs.additional_instructions }}" ]; then
+              echo ""
+              echo "## Additional Instructions"
+              echo "${{ inputs.additional_instructions }}"
+            fi
+          } > /tmp/claude-prompt.txt
+
+      - name: Run Claude Code session
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PROMPT=$(cat /tmp/claude-prompt.txt)
+
+          # Build allowed tools list
+          BASE_TOOLS="Edit,Write,Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(npm:*),Bash(npx:*),Bash(ls:*),Bash(gh issue comment:*)"
+
+          # Add MCP tools if PIA integration is configured
+          if [ -f /tmp/mcp-config.json ]; then
+            BASE_TOOLS="$BASE_TOOLS,mcp__pia__sendAgentMessage,mcp__pia__updateMyContext,mcp__pia__search"
+            MCP_FLAG="--mcp-config /tmp/mcp-config.json"
+          else
+            MCP_FLAG=""
+          fi
+
+          # Add extra tools if specified
+          EXTRA="${{ inputs.extra_allowed_tools }}"
+          if [ -n "$EXTRA" ]; then
+            BASE_TOOLS="$BASE_TOOLS,$EXTRA"
+          fi
+
+          claude -p "$PROMPT" \
+            --output-format text \
+            --max-turns ${{ inputs.max_turns }} \
+            --model ${{ inputs.model }} \
+            $MCP_FLAG \
+            --allowedTools "$BASE_TOOLS" \
+            2>&1 | tee claude-output.txt
+
+      - name: Detect if Claude asked questions (no code changes)
+        id: detect
+        run: |
+          if git log origin/main..HEAD --oneline | grep -q .; then
+            echo "asked_questions=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "asked_questions=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push and create PR
+        id: pr
+        if: steps.detect.outputs.asked_questions == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUM="${{ inputs.issue_number }}"
+          BRANCH="${{ steps.branch.outputs.name }}"
+          ISSUE_TITLE=$(gh issue view "$ISSUE_NUM" --json title -q '.title')
+
+          git push --force-with-lease -u origin "$BRANCH"
+
+          COMMIT_LOG=$(git log origin/main..HEAD --pretty=format:'- %s' | head -20)
+
+          PR_URL=$(gh pr create \
+            --title "Issue #${ISSUE_NUM}: ${ISSUE_TITLE}" \
+            --body "$(cat <<EOF
+          ## Summary
+          Resolves #${ISSUE_NUM}
+
+          ### Changes
+          ${COMMIT_LOG}
+
+          ---
+          _This PR was created by a headless Claude Code cloud session. Please review carefully before merging._
+
+          Generated with [Claude Code](https://claude.com/claude-code)
+          EOF
+          )" \
+            --base main \
+            --head "$BRANCH" 2>&1) || true
+
+          ACTUAL_PR_URL=$(gh pr view "$BRANCH" --json url -q '.url' 2>/dev/null || echo "")
+          if [ -n "$ACTUAL_PR_URL" ]; then
+            echo "url=$ACTUAL_PR_URL" >> "$GITHUB_OUTPUT"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::PR creation failed: $PR_URL"
+          fi
+
+      - name: Comment on issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUM="${{ inputs.issue_number }}"
+          OUTPUT=$(tail -100 claude-output.txt 2>/dev/null || echo "No output captured")
+
+          if [ "${{ steps.pr.outputs.created }}" = "true" ]; then
+            gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
+          Claude Cloud session completed. PR created: ${{ steps.pr.outputs.url }}
+
+          <details>
+          <summary>Session output (last 100 lines)</summary>
+
+          \`\`\`
+          ${OUTPUT}
+          \`\`\`
+          </details>
+          EOF
+          )"
+          else
+            gh issue comment "$ISSUE_NUM" --body "$(cat <<EOF
+          Claude Cloud session completed but no commits were produced.
+
+          <details>
+          <summary>Session output (last 100 lines)</summary>
+
+          \`\`\`
+          ${OUTPUT}
+          \`\`\`
+          </details>
+          EOF
+          )"
+          fi
