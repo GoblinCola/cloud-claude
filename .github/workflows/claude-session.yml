@@ -6,7 +6,7 @@ on:
       issue_number:
         description: 'GitHub issue number to work on'
         required: true
-        type: number
+        type: string
       additional_instructions:
         description: 'Extra instructions beyond the issue body'
         required: false
@@ -20,13 +20,13 @@ on:
       max_turns:
         description: 'Maximum conversation turns'
         required: false
-        type: number
-        default: 50
+        type: string
+        default: '50'
       timeout_minutes:
         description: 'Job timeout in minutes'
         required: false
-        type: number
-        default: 30
+        type: string
+        default: '30'
       extra_allowed_tools:
         description: 'Additional allowedTools (comma-separated, appended to defaults)'
         required: false
