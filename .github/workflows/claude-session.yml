@@ -41,7 +41,7 @@ on:
 jobs:
   run-claude:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     permissions:
       contents: write
       pull-requests: write
